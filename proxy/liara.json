@@ -1,0 +1,7 @@
+{
+  "platform": "docker",
+  "port": 9000,
+  "build": {
+    "location": "iran"
+  }
+}

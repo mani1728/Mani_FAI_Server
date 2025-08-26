@@ -1,0 +1,64 @@
+#version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: project-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./db_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=secret
+    networks:
+      - project_network
+
+  mongo_express:
+    image: mongo-express:latest
+    container_name: project-mongo_express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=secret
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=secret
+    depends_on:
+      - mongodb
+    networks:
+      - project_network
+
+  proxy_service:
+    build:
+      context: ./proxy
+    container_name: project-proxy_service
+    restart: unless-stopped
+    ports:
+      - "9876:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - project_network
+    depends_on:
+      - db_handler_service # ?????? ???? ??? ?? ????? ??????? ???? ???
+
+  # --- ?? ????? ???? ---
+  db_handler_service:
+    build:
+      context: ./db_handler
+    container_name: project-db_handler
+    restart: unless-stopped
+    networks:
+      - project_network
+    depends_on:
+      - mongodb # ??? ????? ?? ????? ?????? ???
+  # --- ????? ????? ???? ---
+
+networks:
+  project_network:
+    driver: bridge
+    name: project_main_network

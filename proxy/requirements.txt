@@ -1,0 +1,4 @@
+# /home/test/project/proxy/requirements.txt
+websockets
+requests
+aiohttp

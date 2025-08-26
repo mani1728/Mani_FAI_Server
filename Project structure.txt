@@ -1,0 +1,66 @@
+%%{init: {'theme':'base', 'themeVariables': {
+    'primaryColor': '#000000',
+    'primaryBorderColor': '#d36cff',
+    'primaryTextColor': '#ffffff',
+    'lineColor': '#ff4444',
+    'fontFamily': 'Tahoma, sans-serif',
+    'fontSize': '14px',
+    'edgeLabelBackground':'#000000',
+    'background': '#111111'
+}}}%%
+flowchart LR
+    %% Styles
+    classDef client fill:#000,stroke:#9f9,stroke-width:1px,color:#fff,font-size:14px;
+    classDef internet fill:#223322,stroke:#9f9,stroke-width:2px,color:#fff,font-size:14px;
+    classDef container fill:#000,stroke:#d36cff,stroke-dasharray:5 5,stroke-width:1px,color:#fff,font-size:14px;
+    classDef dashedRed stroke:#ff4444,stroke-dasharray:5 5,stroke-width:1px;
+
+    %% Windows Clients
+    subgraph Clients[Windows Clients]
+        A1[Windows Client 1]:::client --> |Agent_App.exe| IPClient[ip-client:9001]:::client
+        A2[Windows Client 2]:::client --> |Agent_App.exe| IPClient
+        A3[Windows Client 3]:::client --> |Agent_App.exe| IPClient
+        A4[Windows Client 4]:::client --> |Agent_App.exe| IPClient
+    end
+
+    %% Internet
+    IPClient --> Internet((Internet)):::internet
+    Internet --> |9000| IPServer[ip-server:9000]:::client
+
+    %% Container Cluster
+    subgraph Cluster[container cluster]
+        proxy_container[proxy_container]:::container
+        container_Auth[container_Auth]:::container
+        mongodb_container[mongodb_container]:::container
+        container_kafka[container_kafka]:::container
+        container_AIs[container_AIs]:::container
+        container_grafana[container_grafana]:::container
+        Other_container[Other_container]:::container
+        container_prometheus[container_prometheus]:::container
+        container_nginx[container_nginx]:::container
+        container_redis[container_redis]:::container
+    end
+
+    %% Connections inside the cluster
+    IPServer --> proxy_container:::dashedRed
+
+    proxy_container --> container_Auth:::dashedRed
+    proxy_container --> container_kafka:::dashedRed
+    proxy_container --> container_grafana:::dashedRed
+    proxy_container --> Other_container:::dashedRed
+
+    container_Auth --> mongodb_container:::dashedRed
+    mongodb_container --> container_AIs:::dashedRed
+    mongodb_container --> container_kafka:::dashedRed
+    container_AIs --> container_kafka:::dashedRed
+
+    container_kafka --> proxy_container:::dashedRed
+
+    Other_container --> container_nginx:::dashedRed
+    Other_container --> container_prometheus:::dashedRed
+    container_nginx --> container_prometheus:::dashedRed
+    container_nginx --> proxy_container:::dashedRed
+
+    container_prometheus --> container_grafana:::dashedRed
+    container_prometheus --> container_redis:::dashedRed
+    container_redis --> container_nginx:::dashedRed
