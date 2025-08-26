@@ -74,7 +74,8 @@ def get_symbols(login_id):
         db_name = f"db_{login_id}"
         db = client[db_name]
         symbols_collection = db["symbols"]
-        symbols_list = list(symbols_collection.find({}, {"_id": 0}))
+        # کد اصلاح شده: فقط فیلد 'name' را برمی‌گرداند و فیلد '_id' را حذف می‌کند
+        symbols_list = list(symbols_collection.find({}, {"name": 1, "_id": 0}))
         
         if not symbols_list:
             logging.warning(f"No symbols found in database '{db_name}' for login_id: {login_id}")
