@@ -1,6 +1,7 @@
 # main.py
 
 import os
+import re # کتابخانه Regular Expression برای جستجوی پیشرفته
 from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from bson.json_util import dumps
@@ -13,35 +14,65 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = Flask(__name__)
 
 # --- اتصال به MongoDB ---
-# بهترین روش، خواندن آدرس اتصال از متغیرهای محیطی (Environment Variables) است.
-# این کار امنیت را بالا می‌برد و نیاز به تغییر کد در محیط‌های مختلف را از بین می‌برد.
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
     logging.error("MONGO_URI environment variable not set!")
-    # در محیط واقعی بهتر است برنامه در اینجا متوقف شود
-    # raise ValueError("MONGO_URI is not set in the environment")
 
 client = MongoClient(MONGO_URI)
 logging.info("Successfully connected to MongoDB.")
 
 
+# ### مسیر جدید برای جستجوی نمادها ###
+@app.route('/search_symbols/<int:login_id>', methods=['GET'])
+def search_symbols(login_id):
+    """
+    این مسیر یک عبارت جستجو را به عنوان query parameter دریافت کرده
+    و در کالکشن symbols کاربر به دنبال نمادهای منطبق می‌گردد.
+    مثال درخواست: /search_symbols/633447?q=aud
+    """
+    # دریافت عبارت جستجو از query string (بعد از علامت ؟ در URL)
+    search_query = request.args.get('q', '').strip()
+    logging.info(f"Received search request for login '{login_id}' with query: '{search_query}'")
+
+    # اگر عبارت جستجو خالی بود، لیست خالی برگردان
+    if not search_query:
+        return jsonify([]), 200
+
+    try:
+        db_name = f"db_{login_id}"
+        db = client[db_name]
+        symbols_collection = db["symbols"]
+
+        # ساخت کوئری جستجو با استفاده از Regular Expression برای پشتیبانی از
+        # جستجوی case-insensitive و partial match
+        # 'i' -> case-insensitive
+        regex_query = re.compile(search_query, re.IGNORECASE)
+        
+        # اجرای کوئری روی فیلد 'name'
+        # projection (`{"name": 1, "_id": 0}`) باعث می‌شود فقط فیلد name در خروجی باشد
+        matched_symbols = list(symbols_collection.find(
+            {"name": {"$regex": regex_query}},
+            {"name": 1, "_id": 0}
+        ))
+        
+        logging.info(f"Found {len(matched_symbols)} symbols matching '{search_query}' for login '{login_id}'")
+        return dumps(matched_symbols), 200
+
+    except Exception as e:
+        logging.error(f"Error in search_symbols for login '{login_id}': {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/get_symbols/<int:login_id>', methods=['GET'])
 def get_symbols(login_id):
     """
-    این مسیر بر اساس login_id به دیتابیس مربوطه متصل شده 
-    و لیست تمام نمادها را از کالکشن 'symbols' برمی‌گرداند.
+    این مسیر لیست تمام نمادها را از کالکشن 'symbols' برمی‌گرداند.
     """
     logging.info(f"Received request to get symbols for login_id: {login_id}")
     try:
-        # ساخت نام دیتابیس به صورت داینامیک
         db_name = f"db_{login_id}"
         db = client[db_name]
-        
-        # دسترسی به کالکشن symbols
         symbols_collection = db["symbols"]
-        
-        # واکشی تمام اسناد (نمادها) از کالکشن
-        # projection (`{"_id": 0}`) برای حذف فیلد پیش‌فرض _id از خروجی است
         symbols_list = list(symbols_collection.find({}, {"_id": 0}))
         
         if not symbols_list:
@@ -49,17 +80,18 @@ def get_symbols(login_id):
             return jsonify({"error": f"Symbols not found for login_id {login_id}"}), 404
             
         logging.info(f"Successfully retrieved {len(symbols_list)} symbols for login_id: {login_id}")
-        
-        # استفاده از dumps برای تبدیل صحیح داده‌های MongoDB به JSON
         return dumps(symbols_list), 200
 
     except Exception as e:
         logging.error(f"Error in get_symbols for {login_id}: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-# مسیرهای دیگر را نیز می‌توانید به همین شکل با منطق دیتابیس تکمیل کنید
+
 @app.route('/update_account_info', methods=['POST'])
 def update_account_info():
+    """
+    این مسیر اطلاعات حساب را در دیتابیس 'my-app' ذخیره می‌کند.
+    """
     data = request.get_json()
     login_id = data.get('login')
     if not login_id:
@@ -67,14 +99,37 @@ def update_account_info():
 
     logging.info(f"Received request to update account info for login: {login_id}")
     try:
-        # در اینجا به دیتابیس 'my-app' و کالکشن 'account_info' متصل می‌شویم
         db = client["my-app"]
         account_collection = db["account_info"]
-        # استفاده از update_one با upsert=True باعث می‌شود اگر رکوردی وجود نداشت، آن را ایجاد کند
         account_collection.update_one({"_id": login_id}, {"$set": data}, upsert=True)
         return jsonify({"status": "success", "message": "Account info updated"}), 200
     except Exception as e:
         logging.error(f"Error updating account info for {login_id}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+# تابع sync_symbols شما نیز برای تکمیل منطق باید اینجا باشد
+@app.route('/sync_symbols', methods=['POST'])
+def sync_symbols():
+    data = request.get_json()
+    if not data or 'login' not in data or 'symbols' not in data:
+        return jsonify({"error": "Invalid payload. 'login' and 'symbols' fields are required."}), 400
+
+    login_id = data.get('login')
+    symbols_to_sync = data.get('symbols')
+    logging.info(f"Received request to sync {len(symbols_to_sync)} symbols for login: {login_id}")
+    try:
+        db_name = f"db_{login_id}"
+        db = client[db_name]
+        symbols_collection = db["symbols"]
+        for symbol_data in symbols_to_sync:
+            symbol_name = symbol_data.get('name') or symbol_data.get('_id')
+            if not symbol_name:
+                continue
+            symbols_collection.update_one({"_id": symbol_name}, {"$set": symbol_data}, upsert=True)
+        logging.info(f"Successfully synced symbols for login: {login_id}")
+        return jsonify({"status": "success", "message": "Symbols synced successfully"}), 200
+    except Exception as e:
+        logging.error(f"Error syncing symbols for {login_id}: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 
