@@ -1,7 +1,8 @@
 {
-  "platform": "docker",
-  "port": 5000,
-  "build": {
-    "location": "iran"
-  }
+  "platform": "python",
+  "app": "project-db-handler",
+  "python": {
+    "version": "3.11"
+  },
+  "port": 8000
 }
