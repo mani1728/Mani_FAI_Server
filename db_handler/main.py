@@ -9,6 +9,7 @@ import re
 from flask import Flask, jsonify, request, Response
 from pymongo import MongoClient
 from bson.json_util import dumps
+import json # json را برای استفاده در Response وارد می‌کنیم
 import logging
 
 # تنظیمات اولیه لاگ
@@ -19,7 +20,8 @@ app = Flask(__name__)
 
 # --- اتصال به MongoDB ---
 MONGO_URI = os.environ.get("MONGO_URI")
-if not MONO_URI:
+# FIX: اصلاح اشتباه تایپی از MONO_URI به MONGO_URI
+if not MONGO_URI:
     logging.critical("FATAL: MONGO_URI environment variable not set!")
     raise ValueError("MONGO_URI is not set in the environment")
 
@@ -57,7 +59,7 @@ def get_symbols(login_id):
 
 
 @app.route('/search_symbols/<int:login_id>', methods=['GET'])
-def search_symbols(search_query):
+def search_symbols(login_id): # FIX: پارامتر ورودی تابع اصلاح شد
     """
     نمادها را در دیتابیس کاربر به صورت case-insensitive جستجو می‌کند.
     """
