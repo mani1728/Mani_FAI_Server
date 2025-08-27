@@ -1,8 +1,12 @@
-# main.py
-
+# ==================================================================
+# File: db_handler/main.py
+# Description: کد کامل و اصلاح شده.
+# تغییر اصلی: استفاده از Response برای تضمین Content-Type صحیح.
+# ==================================================================
 import os
 import re
-from flask import Flask, jsonify, request
+# 1. Response را از فلسک import می‌کنیم
+from flask import Flask, jsonify, request, Response
 from pymongo import MongoClient
 from bson.json_util import dumps
 import logging
@@ -15,69 +19,12 @@ app = Flask(__name__)
 
 # --- اتصال به MongoDB ---
 MONGO_URI = os.environ.get("MONGO_URI")
-if not MONGO_URI:
+if not MONO_URI:
     logging.critical("FATAL: MONGO_URI environment variable not set!")
-    # در محیط واقعی بهتر است برنامه در اینجا متوقف شود
     raise ValueError("MONGO_URI is not set in the environment")
 
-# افزایش timeout برای جلوگیری از کرش کردن در اتصال اولیه
 client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=30000)
 logging.info("Successfully connected to MongoDB.")
-
-
-@app.route('/update_account_info', methods=['POST'])
-def update_account_info():
-    """
-    اطلاعات حساب را در دیتابیس مرکزی 'my-app' ذخیره یا به‌روزرسانی می‌کند.
-    """
-    data = request.get_json()
-    login_id = data.get('login')
-    if not login_id:
-        return jsonify({"error": "login field is required"}), 400
-
-    logging.info(f"Received request to update account info for login: {login_id}")
-    try:
-        db = client["my-app"]
-        account_collection = db["account_info"]
-        # اگر کاربری با این login_id وجود نداشت، ساخته می‌شود (upsert=True)
-        account_collection.update_one({"_id": login_id}, {"$set": data}, upsert=True)
-        return jsonify({"status": "success", "message": "Account info updated"}), 200
-    except Exception as e:
-        logging.error(f"Error updating account info for {login_id}: {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/sync_symbols', methods=['POST'])
-def sync_symbols():
-    """
-    برای هر کاربر یک دیتابیس مجزا ساخته (db_<login_id>) و اطلاعات نمادها را در آن ذخیره یا به‌روزرسانی می‌کند.
-    """
-    data = request.get_json()
-    if not data or 'login' not in data or 'symbols' not in data:
-        return jsonify({"error": "Invalid payload. 'login' and 'symbols' fields are required."}), 400
-
-    login_id = data.get('login')
-    symbols_to_sync = data.get('symbols')
-    logging.info(f"Received request to sync {len(symbols_to_sync)} symbols for login: {login_id}")
-    try:
-        # 1. نام دیتابیس به صورت داینامیک بر اساس login_id ساخته می‌شود
-        db_name = f"db_{login_id}"
-        db = client[db_name]
-        symbols_collection = db["symbols"]
-        
-        # 2. اگر دیتابیس یا کالکشن وجود نداشته باشد، MongoDB خودکار آن را می‌سازد
-        for symbol_data in symbols_to_sync:
-            symbol_name = symbol_data.get('name') or symbol_data.get('_id')
-            if not symbol_name:
-                continue
-            # 3. اگر نماد وجود داشت آپدیت، و اگر نداشت ساخته می‌شود (upsert=True)
-            symbols_collection.update_one({"_id": symbol_name}, {"$set": symbol_data}, upsert=True)
-            
-        logging.info(f"Successfully synced symbols for login: {login_id}")
-        return jsonify({"status": "success", "message": "Symbols synced successfully"}), 200
-    except Exception as e:
-        logging.error(f"Error syncing symbols for {login_id}: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/get_symbols/<int:login_id>', methods=['GET'])
@@ -91,15 +38,18 @@ def get_symbols(login_id):
         db = client[db_name]
         symbols_collection = db["symbols"]
         
-        # Projection: فقط فیلد 'name' را برمی‌گرداند برای بهینه‌سازی
         symbols_list = list(symbols_collection.find({}, {"name": 1, "_id": 0}))
         
         if not symbols_list:
-            logging.warning(f"No symbols found in database '{db_name}' for login_id: {login_id}")
-            return jsonify([]), 200 # برگرداندن لیست خالی بهتر از 404 است
+            logging.warning(f"No symbols found for login_id: {login_id}")
+            # حتی برای لیست خالی هم پاسخ JSON صحیح برمی‌گردانیم
+            return Response(json.dumps([]), mimetype='application/json'), 200
             
         logging.info(f"Successfully retrieved {len(symbols_list)} symbols for login_id: {login_id}")
-        return dumps(symbols_list), 200
+        
+        # 2. FIX: پاسخ را در یک Response object با mimetype صحیح قرار می‌دهیم
+        json_response = dumps(symbols_list)
+        return Response(json_response, mimetype='application/json'), 200
 
     except Exception as e:
         logging.error(f"Error in get_symbols for {login_id}: {e}")
@@ -107,7 +57,7 @@ def get_symbols(login_id):
 
 
 @app.route('/search_symbols/<int:login_id>', methods=['GET'])
-def search_symbols(login_id):
+def search_symbols(search_query):
     """
     نمادها را در دیتابیس کاربر به صورت case-insensitive جستجو می‌کند.
     """
@@ -115,7 +65,7 @@ def search_symbols(login_id):
     logging.info(f"Received search request for login '{login_id}' with query: '{search_query}'")
 
     if not search_query:
-        return jsonify([]), 200
+        return Response(json.dumps([]), mimetype='application/json'), 200
 
     try:
         db_name = f"db_{login_id}"
@@ -130,12 +80,53 @@ def search_symbols(login_id):
         ))
         
         logging.info(f"Found {len(matched_symbols)} symbols matching '{search_query}' for login '{login_id}'")
-        return dumps(matched_symbols), 200
+        
+        # 3. FIX: این مسیر هم باید mimetype صحیح را برگرداند
+        json_response = dumps(matched_symbols)
+        return Response(json_response, mimetype='application/json'), 200
 
     except Exception as e:
         logging.error(f"Error in search_symbols for login '{login_id}': {e}")
         return jsonify({"error": "Internal server error"}), 500
 
+
+# توابع update_account_info و sync_symbols بدون تغییر باقی می‌مانند
+@app.route('/update_account_info', methods=['POST'])
+def update_account_info():
+    data = request.get_json()
+    login_id = data.get('login')
+    if not login_id: return jsonify({"error": "login field is required"}), 400
+    logging.info(f"Received request to update account info for login: {login_id}")
+    try:
+        db = client["my-app"]
+        account_collection = db["account_info"]
+        account_collection.update_one({"_id": login_id}, {"$set": data}, upsert=True)
+        return jsonify({"status": "success", "message": "Account info updated"}), 200
+    except Exception as e:
+        logging.error(f"Error updating account info for {login_id}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/sync_symbols', methods=['POST'])
+def sync_symbols():
+    data = request.get_json()
+    if not data or 'login' not in data or 'symbols' not in data:
+        return jsonify({"error": "Invalid payload."}), 400
+    login_id = data.get('login')
+    symbols_to_sync = data.get('symbols')
+    logging.info(f"Received request to sync {len(symbols_to_sync)} symbols for login: {login_id}")
+    try:
+        db_name = f"db_{login_id}"
+        db = client[db_name]
+        symbols_collection = db["symbols"]
+        for symbol_data in symbols_to_sync:
+            symbol_name = symbol_data.get('name') or symbol_data.get('_id')
+            if not symbol_name: continue
+            symbols_collection.update_one({"_id": symbol_name}, {"$set": symbol_data}, upsert=True)
+        logging.info(f"Successfully synced symbols for login: {login_id}")
+        return jsonify({"status": "success", "message": "Symbols synced successfully"}), 200
+    except Exception as e:
+        logging.error(f"Error syncing symbols for {login_id}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
