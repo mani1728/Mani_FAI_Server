@@ -1,7 +1,6 @@
 # ==================================================================
 # File: Mani_FAI_Server/db_handler/main.py
-# Description: کد کامل و نهایی سرور دی‌بی‌هندلر.
-# تغییر اصلی: افزودن مسیر جدید /sync_rates_data برای ذخیره داده‌های کندل.
+# Description: نسخه کامل و نهایی سرور دی‌بی‌هندلر با تمام قابلیت‌ها.
 # ==================================================================
 import os
 import re
@@ -41,15 +40,11 @@ def sync_rates_data():
     try:
         db_name = f"db_{login_id}"
         db = client[db_name]
-        # نام کالکشن برابر با نام نماد خواهد بود (مثلاً 'EURUSD_ecn')
-        # کاراکترهای نامعتبر در نام کالکشن را با آندرلاین جایگزین می‌کنیم
         safe_collection_name = symbol_name.replace('.', '_').replace('$', '')
         collection = db[safe_collection_name]
 
-        # استفاده از bulk_write برای افزایش چشمگیر سرعت درج/آپدیت داده‌ها
         operations = []
         for rate in rates_data:
-            # از زمان (time) به عنوان شناسه یکتا (_id) برای هر کندل استفاده می‌کنیم
             operation = UpdateOne(
                 {"_id": rate.get("time")},
                 {"$set": rate},
@@ -72,7 +67,6 @@ def sync_rates_data():
         return jsonify({"error": "Internal server error"}), 500
 
 
-# ... (بقیه مسیرهای شما بدون تغییر باقی می‌مانند)
 @app.route('/get_symbols/<int:login_id>', methods=['GET'])
 def get_symbols(login_id):
     logging.info(f"Received request to get symbols for login_id: {login_id}")
@@ -89,6 +83,28 @@ def get_symbols(login_id):
         return Response(json_response, mimetype='application/json'), 200
     except Exception as e:
         logging.error(f"Error in get_symbols for {login_id}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/search_symbols/<int:login_id>', methods=['GET'])
+def search_symbols(login_id):
+    search_query = request.args.get('q', '').strip()
+    logging.info(f"Received search request for login '{login_id}' with query: '{search_query}'")
+    if not search_query:
+        return Response(json.dumps([]), mimetype='application/json'), 200
+    try:
+        db_name = f"db_{login_id}"
+        db = client[db_name]
+        symbols_collection = db["symbols"]
+        regex_query = re.compile(search_query, re.IGNORECASE)
+        matched_symbols = list(symbols_collection.find(
+            {"name": {"$regex": regex_query}},
+            {"name": 1, "_id": 0}
+        ))
+        logging.info(f"Found {len(matched_symbols)} symbols matching '{search_query}' for login '{login_id}'")
+        json_response = dumps(matched_symbols)
+        return Response(json_response, mimetype='application/json'), 200
+    except Exception as e:
+        logging.error(f"Error in search_symbols for login '{login_id}': {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/update_account_info', methods=['POST'])
