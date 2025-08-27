@@ -1,0 +1,8 @@
+{
+  "platform": "docker",
+  "port": 9092,
+  "app": "kafka-broker",
+  "build": {
+     "location": "iran"
+  }
+}
