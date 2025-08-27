@@ -1,93 +1,83 @@
 # ==================================================================
-# File: Mani_FAI_Server/proxy/proxy_app/main.py
-# Description: نسخه کامل و نهایی سرور پراکسی با تمام قابلیت‌ها.
+# File: Mani_FAI_Server/proxy/proxy_app/main.py (Kafka Version)
+# Description: نسخه بازنویسی شده پراکسی برای کار با کافکا.
 # ==================================================================
 import asyncio
 import websockets
 import json
 import aiohttp
 import os
+from aiokafka import AIOKafkaProducer  # کتابخانه کافکا برای asyncio
 from logger import setup_logger
 
 # Initialize the logger
 logger = setup_logger()
 
-# Read environment variables
-DB_HANDLER_BASE_URL = os.getenv("DB_HANDLER_URL")
-ACCOUNT_HANDLER_URL = f"{DB_HANDLER_BASE_URL}/update_account_info"
-SYMBOLS_SYNC_URL = f"{DB_HANDLER_BASE_URL}/sync_symbols"
-GET_SYMBOLS_URL = f"{DB_HANDLER_BASE_URL}/get_symbols"
-# مسیر جدید برای ارسال داده‌های کندل
-RATES_DATA_SYNC_URL = f"{DB_HANDLER_BASE_URL}/sync_rates_data"
+# --- Kafka Settings ---
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
-async def handler(websocket, http_session):
+# --- DB Handler HTTP Settings (برای درخواست‌های Request/Response) ---
+DB_HANDLER_BASE_URL = os.getenv("DB_HANDLER_URL")
+GET_SYMBOLS_URL = f"{DB_HANDLER_BASE_URL}/get_symbols"
+
+# --- Kafka Topics ---
+# بهتر است نام تاپیک‌ها را نیز از متغیرهای محیطی بخوانید
+TOPIC_ACCOUNT_INFO = "account_info"
+TOPIC_SYMBOLS_SYNC = "symbols_info_sync"
+TOPIC_RATES_SYNC = "sync_rates_data"
+
+
+async def get_kafka_producer():
+    """یک تولیدکننده کافکا ایجاد و آن را برای استفاده آماده می‌کند."""
+    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+    await producer.start()
+    logger.info(f"Successfully connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+    return producer
+
+
+async def handler(websocket, http_session, kafka_producer):
     logger.info(f"Agent connected from {websocket.remote_address}")
     try:
         async for message_str in websocket:
             try:
-                # لاگ کردن پیام خام دریافتی برای دیباگ
                 logger.debug(f"Received raw message: {message_str[:200]}...")
-
                 message_data = json.loads(message_str)
-                
-                # بررسی اینکه آیا پیام دریافتی به درستی به دیکشنری تبدیل شده است
+
                 if not isinstance(message_data, dict):
                     logger.error(f"Parsed message is not a dictionary. Type: {type(message_data)}")
                     continue
 
                 msg_type = message_data.get("type")
+                
+                # تبدیل پیام به فرمت বাইт برای ارسال به کافکا
+                message_bytes = message_str.encode('utf-8')
 
                 if msg_type == "account_info":
-                    logger.info("Forwarding account_info to DB handler...")
-                    account_data = message_data.get("data")
-                    if account_data:
-                        async with http_session.post(ACCOUNT_HANDLER_URL, json=account_data) as resp:
-                            if resp.status != 200:
-                                logger.error(f"DB handler returned error {resp.status} for account_info")
-                    else:
-                        logger.warning("account_info message received without 'data' field.")
+                    logger.info("Producing account_info message to Kafka...")
+                    await kafka_producer.send_and_wait(TOPIC_ACCOUNT_INFO, message_bytes)
 
                 elif msg_type == "symbols_info_sync":
                     login = message_data.get('login')
-                    symbols = message_data.get('symbols')
-
-                    if not login or symbols is None:
-                        logger.error("Received symbols_info_sync message with missing 'login' or 'symbols' field.")
-                        continue
-                    
-                    logger.info(f"Forwarding symbol batch for login {login} with {len(symbols)} symbols.")
-                    
-                    payload_to_forward = {
-                        "login": login,
-                        "symbols": symbols
-                    }
-                    
-                    async with http_session.post(SYMBOLS_SYNC_URL, json=payload_to_forward) as resp:
-                        if resp.status != 200:
-                            logger.error(f"DB handler returned error {resp.status} for symbols_info_sync")
+                    symbol_count = len(message_data.get('symbols', []))
+                    logger.info(f"Producing symbol batch for login {login} with {symbol_count} symbols to Kafka...")
+                    await kafka_producer.send_and_wait(TOPIC_SYMBOLS_SYNC, message_bytes)
 
                 elif msg_type == "sync_rates_data":
                     login = message_data.get('login')
                     symbol = message_data.get('symbol')
-                    rates = message_data.get('data')
-                    
-                    if not all([login, symbol, rates is not None]):
-                        logger.error("Received sync_rates_data with missing fields.")
-                        continue
-                        
-                    logger.info(f"Forwarding {len(rates)} rates for '{symbol}' for login {login} to DB handler.")
-                    async with http_session.post(RATES_DATA_SYNC_URL, json=message_data) as resp:
-                        if resp.status != 200:
-                            logger.error(f"DB handler returned error {resp.status} for sync_rates_data on symbol '{symbol}'")
+                    rates_count = len(message_data.get('data', []))
+                    logger.info(f"Producing {rates_count} rates for '{symbol}' for login {login} to Kafka...")
+                    await kafka_producer.send_and_wait(TOPIC_RATES_SYNC, message_bytes)
 
                 elif msg_type == "get_db_symbols":
+                    # این بخش همچنان از HTTP استفاده می‌کند
                     login = message_data.get('login')
                     if not login:
                         logger.warning("Received get_db_symbols request without login number.")
                         continue
                     
                     request_url = f"{GET_SYMBOLS_URL}/{login}"
-                    logger.info(f"Requesting symbols for login {login} from {request_url}")
+                    logger.info(f"Requesting symbols via HTTP for login {login} from {request_url}")
                     
                     async with http_session.get(request_url) as resp:
                         if resp.status == 200:
@@ -95,8 +85,8 @@ async def handler(websocket, http_session):
                             logger.info(f"Successfully retrieved {len(symbols_data)} symbols for login {login}")
                             await websocket.send(json.dumps({"type": "db_symbols_list", "data": symbols_data}))
                         else:
-                            logger.error(f"DB handler returned error {resp.status} for get_db_symbols for login {login}")
-                            await websocket.send(json.dumps({"type": "db_symbols_list", "error": f"Failed to retrieve symbols, status: {resp.status}"}))
+                            logger.error(f"DB handler returned HTTP error {resp.status} for get_db_symbols for login {login}")
+                            await websocket.send(json.dumps({"type": "db_symbols_list", "error": f"Failed, status: {resp.status}"}))
 
             except json.JSONDecodeError:
                 logger.error(f"Could not decode JSON from message: {message_str}")
@@ -106,16 +96,28 @@ async def handler(websocket, http_session):
     except websockets.exceptions.ConnectionClosed:
         logger.info(f"Agent disconnected from {websocket.remote_address}")
 
+
 async def main():
-    if not DB_HANDLER_BASE_URL:
-        logger.critical("FATAL: DB_HANDLER_URL is not set. Application cannot start.")
+    if not DB_HANDLER_BASE_URL or not KAFKA_BOOTSTRAP_SERVERS:
+        logger.critical("FATAL: DB_HANDLER_URL or KAFKA_BOOTSTRAP_SERVERS is not set.")
         return
 
-    async with aiohttp.ClientSession() as http_session:
-        websocket_handler = lambda ws: handler(ws, http_session)
-        async with websockets.serve(websocket_handler, "0.0.0.0", 9000, max_size=2**24):
-            logger.info("Proxy Server started successfully on port 9000")
-            await asyncio.Future()
+    kafka_producer = await get_kafka_producer()
+    
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            # پاس دادن kafka_producer و http_session به هر کانکشن جدید
+            bound_handler = lambda ws: handler(ws, http_session, kafka_producer)
+            async with websockets.serve(bound_handler, "0.0.0.0", 9000, max_size=2**24):
+                logger.info("Kafka-based Proxy Server started successfully on port 9000")
+                await asyncio.Future()
+    finally:
+        logger.info("Stopping Kafka producer...")
+        await kafka_producer.stop()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Server is shutting down.")
