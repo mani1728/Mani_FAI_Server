@@ -1,6 +1,6 @@
 # Dockerfile
-# استفاده از ایمیج رسمی و بهینه شده Bitnami برای کافکا
-FROM bitnami/kafka:latest
+# استفاده از یک نسخه پایدار و مشخص که به صورت پیش‌فرض از Zookeeper استفاده می‌کند
+FROM bitnami/kafka:3.4
 
 # کافکا به صورت پیش‌فرض روی پورت 9092 اجرا می‌شود
 EXPOSE 9092
