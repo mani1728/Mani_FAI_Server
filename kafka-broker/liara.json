@@ -3,6 +3,12 @@
   "port": 9092,
   "app": "kafka-broker",
   "build": {
-     "location": "iran"
-  }
+    "location": "iran"
+  },
+  "disks": [
+    {
+      "name": "kafka-data",
+      "mountTo": "/bitnami/kafka"
+    }
+  ]
 }
