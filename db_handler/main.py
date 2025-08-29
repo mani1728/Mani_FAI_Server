@@ -1,84 +1,100 @@
 # ==================================================================
-# File: Mani_FAI_Server/db_handler/main.py
-# Description: نسخه کامل و نهایی سرور دی‌بی‌هندلر با تمام قابلیت‌ها.
+# File: Mani_FAI_Server/db_handler/main.py (نسخه کامل و نهایی)
+# Description: این سرویس هم به عنوان مصرف‌کننده کافکا و هم وب سرور عمل می‌کند.
 # ==================================================================
 import os
 import re
 import json
+import asyncio
+import logging
 from flask import Flask, jsonify, request, Response
 from pymongo import MongoClient, UpdateOne
 from bson.json_util import dumps
-import logging
+from aiokafka import AIOKafkaConsumer
+from threading import Thread
 
+# --- تنظیمات کلی ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-app = Flask(__name__)
 
+# --- تنظیمات کافکا ---
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS")
+TOPIC_ACCOUNT_INFO = "account_info"
+TOPIC_SYMBOLS_SYNC = "symbols_info_sync"
+TOPIC_RATES_SYNC = "sync_rates_data"
+
+# --- تنظیمات MongoDB ---
 MONGO_URI = os.environ.get("MONGO_URI")
-if not MONGO_URI:
-    logging.critical("FATAL: MONGO_URI environment variable not set!")
-    raise ValueError("MONGO_URI is not set in the environment")
-
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=30000)
+mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=30000)
 logging.info("Successfully connected to MongoDB.")
 
-
-@app.route('/sync_rates_data', methods=['POST'])
-def sync_rates_data():
-    """
-    داده‌های کندل (rates) یک نماد خاص را دریافت کرده و در کالکشن مربوط به آن نماد ذخیره/آپدیت می‌کند.
-    """
-    data = request.get_json()
-    login_id = data.get('login')
-    symbol_name = data.get('symbol')
-    rates_data = data.get('data')
-
-    if not all([login_id, symbol_name, rates_data is not None]):
-        return jsonify({"error": "Missing login, symbol, or data field"}), 400
-
-    logging.info(f"Received request to sync {len(rates_data)} rates for symbol '{symbol_name}' for login {login_id}")
-    
+# --- بخش مصرف‌کننده کافکا (Kafka Consumer) ---
+async def consume_kafka_messages():
+    consumer = AIOKafkaConsumer(
+        TOPIC_ACCOUNT_INFO, TOPIC_SYMBOLS_SYNC, TOPIC_RATES_SYNC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        group_id="db_handler_group",
+        auto_offset_reset='earliest'
+    )
+    await consumer.start()
+    logging.info("Kafka Consumer started and subscribed to topics.")
     try:
-        db_name = f"db_{login_id}"
-        db = client[db_name]
-        safe_collection_name = symbol_name.replace('.', '_').replace('$', '')
-        collection = db[safe_collection_name]
+        async for msg in consumer:
+            try:
+                message_data = json.loads(msg.value.decode('utf-8'))
+                login_id = message_data.get("login")
 
-        operations = []
-        for rate in rates_data:
-            operation = UpdateOne(
-                {"_id": rate.get("time")},
-                {"$set": rate},
-                upsert=True
-            )
-            operations.append(operation)
-        
-        if operations:
-            result = collection.bulk_write(operations)
-            logging.info(f"Bulk write result for '{symbol_name}': "
-                         f"Inserted: {result.inserted_count}, "
-                         f"Modified: {result.modified_count}, "
-                         f"Upserted: {result.upserted_count}")
+                if not login_id:
+                    logging.warning(f"Message received on topic {msg.topic} without login_id.")
+                    continue
 
-        logging.info(f"Successfully synced rates for '{symbol_name}' for login {login_id}")
-        return jsonify({"status": "success"}), 200
+                db_name = f"db_{login_id}"
+                db = mongo_client[db_name]
 
-    except Exception as e:
-        logging.error(f"Error in sync_rates_data for {login_id}: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+                if msg.topic == TOPIC_ACCOUNT_INFO:
+                    account_data = message_data.get("data")
+                    db_central = mongo_client["my-app"]
+                    db_central["account_info"].update_one({"_id": login_id}, {"$set": account_data}, upsert=True)
+                    logging.info(f"Processed account_info for login {login_id}")
 
+                elif msg.topic == TOPIC_SYMBOLS_SYNC:
+                    symbols_to_sync = message_data.get('symbols', [])
+                    collection = db["symbols"]
+                    operations = [
+                        UpdateOne({"_id": s.get('name')}, {"$set": s}, upsert=True)
+                        for s in symbols_to_sync if s.get('name')
+                    ]
+                    if operations:
+                        collection.bulk_write(operations)
+                    logging.info(f"Processed batch of {len(symbols_to_sync)} symbols for login {login_id}")
+
+                elif msg.topic == TOPIC_RATES_SYNC:
+                    symbol_name = message_data.get('symbol')
+                    rates_data = message_data.get('data', [])
+                    safe_collection_name = symbol_name.replace('.', '_').replace('$', '')
+                    collection = db[safe_collection_name]
+                    operations = [
+                        UpdateOne({"_id": r.get("time")}, {"$set": r}, upsert=True)
+                        for r in rates_data if r.get("time")
+                    ]
+                    if operations:
+                        collection.bulk_write(operations)
+                    logging.info(f"Processed batch of {len(rates_data)} rates for '{symbol_name}' for login {login_id}")
+
+            except Exception as e:
+                logging.error(f"Error processing message from topic {msg.topic}: {e}", exc_info=True)
+    finally:
+        await consumer.stop()
+
+# --- بخش وب سرور فلسک (برای درخواست‌های Request/Response) ---
+app = Flask(__name__)
 
 @app.route('/get_symbols/<int:login_id>', methods=['GET'])
 def get_symbols(login_id):
-    logging.info(f"Received request to get symbols for login_id: {login_id}")
     try:
         db_name = f"db_{login_id}"
-        db = client[db_name]
+        db = mongo_client[db_name]
         symbols_collection = db["symbols"]
         symbols_list = list(symbols_collection.find({}, {"name": 1, "_id": 0}))
-        if not symbols_list:
-            logging.warning(f"No symbols found for login_id: {login_id}")
-            return Response(json.dumps([]), mimetype='application/json'), 200
-        logging.info(f"Successfully retrieved {len(symbols_list)} symbols for login_id: {login_id}")
         json_response = dumps(symbols_list)
         return Response(json_response, mimetype='application/json'), 200
     except Exception as e:
@@ -93,7 +109,7 @@ def search_symbols(login_id):
         return Response(json.dumps([]), mimetype='application/json'), 200
     try:
         db_name = f"db_{login_id}"
-        db = client[db_name]
+        db = mongo_client[db_name]
         symbols_collection = db["symbols"]
         regex_query = re.compile(search_query, re.IGNORECASE)
         matched_symbols = list(symbols_collection.find(
@@ -107,42 +123,22 @@ def search_symbols(login_id):
         logging.error(f"Error in search_symbols for login '{login_id}': {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/update_account_info', methods=['POST'])
-def update_account_info():
-    data = request.get_json()
-    login_id = data.get('login')
-    if not login_id: return jsonify({"error": "login field is required"}), 400
-    logging.info(f"Received request to update account info for login: {login_id}")
-    try:
-        db = client["my-app"]
-        account_collection = db["account_info"]
-        account_collection.update_one({"_id": login_id}, {"$set": data}, upsert=True)
-        return jsonify({"status": "success", "message": "Account info updated"}), 200
-    except Exception as e:
-        logging.error(f"Error updating account info for {login_id}: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+def run_flask_app():
+    # اجرای فلسک روی یک پورت متفاوت برای جلوگیری از تداخل
+    app.run(host='0.0.0.0', port=8080)
 
-@app.route('/sync_symbols', methods=['POST'])
-def sync_symbols():
-    data = request.get_json()
-    if not data or 'login' not in data or 'symbols' not in data:
-        return jsonify({"error": "Invalid payload."}), 400
-    login_id = data.get('login')
-    symbols_to_sync = data.get('symbols')
-    logging.info(f"Received request to sync {len(symbols_to_sync)} symbols for login: {login_id}")
-    try:
-        db_name = f"db_{login_id}"
-        db = client[db_name]
-        symbols_collection = db["symbols"]
-        for symbol_data in symbols_to_sync:
-            symbol_name = symbol_data.get('name') or symbol_data.get('_id')
-            if not symbol_name: continue
-            symbols_collection.update_one({"_id": symbol_name}, {"$set": symbol_data}, upsert=True)
-        logging.info(f"Successfully synced symbols for login: {login_id}")
-        return jsonify({"status": "success", "message": "Symbols synced successfully"}), 200
-    except Exception as e:
-        logging.error(f"Error syncing symbols for {login_id}: {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
+# --- اجرای همزمان هر دو بخش ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+    if not MONGO_URI or not KAFKA_BOOTSTRAP_SERVERS:
+        logging.critical("FATAL: MONGO_URI or KAFKA_BOOTSTRAP_SERVERS is not set.")
+    else:
+        # اجرای فلسک در یک ترد جداگانه
+        flask_thread = Thread(target=run_flask_app, daemon=True)
+        flask_thread.start()
+        logging.info("Flask server started in a background thread on port 8080.")
+        
+        # اجرای مصرف‌کننده کافکا در ترد اصلی
+        try:
+            asyncio.run(consume_kafka_messages())
+        except KeyboardInterrupt:
+            logging.info("Shutting down Kafka consumer...")
